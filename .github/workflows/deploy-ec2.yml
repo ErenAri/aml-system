@@ -1,0 +1,55 @@
+name: Deploy EC2 (ECR + Compose)
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPO: aml-x
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push to ECR
+        run: |
+          IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          docker build -t $IMAGE .
+          docker push $IMAGE
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+      - name: SSH deploy (compose pull/up)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            # awscli yoksa kur
+            command -v aws >/dev/null 2>&1 || sudo dnf -y install awscli git
+            # repo yoksa klonla
+            [ -d ~/aml-system ] || git clone https://github.com/ErenAri/aml-system.git ~/aml-system
+            cd ~/aml-system
+            # .env'yi ECR ve TAG ile oluştur
+            echo "ECR_IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}" > .env
+            echo "TAG=${{ github.sha }}" >> .env
+            # ECR login
+            docker login -u AWS -p $(aws ecr get-login-password --region ${{ env.AWS_REGION }}) ${{ steps.login-ecr.outputs.registry }}
+            # en son koddasın
+            git pull || true
+            # deploy
+            docker compose pull
+            docker compose up -d
+            docker compose ps
